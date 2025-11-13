@@ -1,0 +1,9 @@
+# Exclude all dataset / bulky directories
+.vscode/
+attempt_to_only_process_1_file_failed/
+Comp_v6_KLD01/
+fitted_smpl_all_3/
+processed_markers_all_2/
+smpl/
+van_criekinge/
+van_criekinge_unprocessed_1/
