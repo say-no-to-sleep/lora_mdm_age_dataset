@@ -235,7 +235,7 @@ def extract_features(positions, feet_thre, n_raw_offsets, kinematic_chain, face_
     return data
 
 
-def process_file(positions, feet_thre):
+def process_file(positions, feet_thre, pelvis_traj=None):
     # (seq_len, joints_num, 3)
     #     '''Down Sample'''
     #     positions = positions[::ds_num]
@@ -280,6 +280,16 @@ def process_file(positions, feet_thre):
     positions_b = positions.copy()
 
     positions = qrot_np(root_quat_init, positions)
+
+    # --- Align pelvis trajectory to the same origin & facing (if provided) ---
+    pel_aligned = None
+    if pelvis_traj is not None:
+        pel_aligned = pelvis_traj.astype(np.float32).copy()
+        # zero initial XZ so sequences are comparable to positions processing
+        pel_aligned[:, [0, 2]] -= pel_aligned[0, [0, 2]]
+        # rotate with the same initial facing quaternion used on joints
+        # root_quat_init has shape (T, J, 4); take the root joint channel
+        pel_aligned = qrot_np(root_quat_init[:, 0, :], pel_aligned)  # (T, 3)
 
     #     plot_3d_motion("./positions_2.mp4", kinematic_chain, positions, 'title', fps=20)
 
@@ -392,8 +402,18 @@ def process_file(positions, feet_thre):
     # (seq_len-1, 1) rotation velocity along y-axis
     # (seq_len-1, 2) linear velovity on xz plane
     r_velocity = np.arcsin(r_velocity[:, 2:3])
-    l_velocity = velocity[:, [0, 2]]
-    #     print(r_velocity.shape, l_velocity.shape, root_y.shape)
+
+    # Compute planar root linear velocity from pelvis trajectory if available
+    if pel_aligned is not None:
+        # world-space Δ position per frame
+        vel_world = pel_aligned[1:] - pel_aligned[:-1]       # (T-1, 3)
+        # rotate into the root frame of the current sequence
+        vel_local = qrot_np(r_rot[1:], vel_world)            # (T-1, 3)
+        l_velocity = vel_local[:, [0, 2]]                    # XZ components
+    else:
+        # fallback: infer from positions (will be ~0 if joints are root-centered)
+        l_velocity = velocity[:, [0, 2]]
+
     root_data = np.concatenate([r_velocity, l_velocity, root_y[:-1]], axis=-1)
 
     '''Get Joint Rotation Representation'''
@@ -631,7 +651,9 @@ def build_vc_dataset(vc_root: str, vc_splits_dir: str, vc_meta_py: str):
             d = np.load(fin, allow_pickle=True)
             joints = _load_joints(d).astype(np.float32)
 
-            feats, _, _, _ = process_file(joints, 0.002)   # -> (T-1, 263)
+            pelvis_traj_data = d['pelvis_traj'].astype(np.float32) if 'pelvis_traj' in d.files else None
+
+            feats, _, _, _ = process_file(joints, 0.002, pelvis_traj=pelvis_traj_data)
             assert feats.shape[1] == 263, f"Expected 263 features, got {feats.shape[1]} for {fin}"
 
             # relative name WITHOUT extension, keep subject subdir to avoid name clashes
@@ -843,6 +865,7 @@ if __name__ == "__main__":
             data = np.load(args.input_npz, allow_pickle=True)
             positions_hml = data['joints'].astype(np.float32) # Shape: (T, 22, 3)
             fps = float(data.get('fps', 20.0)) # Get FPS, default to 20 if missing
+            pelvis = data['pelvis_traj'].astype(np.float32) if 'pelvis_traj' in data.files else None
             print(f"Loaded {positions_hml.shape[0]} frames, {positions_hml.shape[1]} joints at {fps} Hz.")
         except Exception as e:
             print(f"Error loading input NPZ file {args.input_npz}: {e}")
@@ -862,7 +885,7 @@ if __name__ == "__main__":
         print("Processing file to extract features...")
         try:
             # process_file handles canonicalization internally now
-            features, _, _, _ = process_file(positions_hml, args.feet_threshold)
+            features, _, _, _ = process_file(positions_hml, args.feet_threshold, pelvis_traj=pelvis)
             # features shape: (T-1, 263)
             print(f"Generated features of shape: {features.shape}")
         except Exception as e:
